@@ -65,19 +65,19 @@ app.get('/', async (req, res) => {
   const isVideo = req.query.video === 'true';
 
   if (!text) { 
-  const json = await (await fetch('http://ip-api.com/json')).json()
-  return res.json({
+    const json = await (await fetch('http://ip-api.com/json')).json()
+    return res.json({
             status: true,
             msg: 'Parameter text diperlukan',
             data: json
-       })
+    });
   }
 
   const key = hashText(text);
 
   if (!isVideo) {
     const cachedPath = imageCache.get(key);
-    if (cachedPath && existsSync(cachedPath)) return res.sendFile(cachedPath);
+    if (cachedPath) return res.send(cachedPath);
 
     try {
       const imagePath = path.join(TEMP_DIR, `${key}.png`);
@@ -96,7 +96,7 @@ app.get('/', async (req, res) => {
   }
 
   const cachedVideo = videoCache.get(key);
-  if (cachedVideo && existsSync(cachedVideo)) return res.sendFile(cachedVideo);
+  if (cachedVideo) return res.sendFile(cachedVideo);
 
   const words = text.split(' ').slice(0, 40);
   const framePaths = [];
