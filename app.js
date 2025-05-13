@@ -77,18 +77,23 @@ app.get('/', async (req, res) => {
 
   if (!isVideo) {
     const cachedPath = imageCache.get(key);
-    if (cachedPath) return res.send(cachedPath);
+    if (cachedPath) {
+      console.log(`[CACHE] - Mengirim gambar`);
+      return res.sendFile(cachedPath);
+    }
 
     try {
       const imagePath = path.join(TEMP_DIR, `${key}.png`);
       if (existsSync(imagePath)) {
         imageCache.set(key, imagePath);
+        console.log(`[FS] - Mengirim gambar`);
         return res.sendFile(imagePath);
       }
 
       await fetchImage(text, imagePath);
       imageCache.set(key, imagePath);
       res.setHeader('Content-Type', 'image/png');
+      console.log(`[GENERATE] - Mengirim gambar`);
       return res.sendFile(imagePath);
     } catch (err) {
       return res.status(500).json({ error: 'Gagal menghasilkan gambar', details: err.message });
@@ -96,8 +101,11 @@ app.get('/', async (req, res) => {
   }
 
   const cachedVideo = videoCache.get(key);
-  if (cachedVideo) return res.sendFile(cachedVideo);
-
+  if (cachedVideo) {
+    console.log(`[CACHE] - Mengirim video`);
+    return res.sendFile(cachedVideo);
+  }
+  
   const words = text.split(' ').slice(0, 40);
   const framePaths = [];
   
@@ -152,6 +160,7 @@ app.get('/', async (req, res) => {
 
       videoCache.set(key, videoOutputPath);
       res.setHeader('Content-Type', 'video/mp4');
+      console.log(`[GENERATE] - Mengirim video`);
       res.sendFile(videoOutputPath);
     });
 
