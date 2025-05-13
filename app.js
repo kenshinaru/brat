@@ -1,138 +1,110 @@
-import 'dotenv/config';
-import express from 'express';
-import morgan from 'morgan';
-import { chromium } from 'playwright';
-import path from 'path';
-import fs from 'fs/promises';
-import { existsSync, unlinkSync } from 'fs';
-import os from 'os';
-import { exec } from 'child_process';
-import { fileURLToPath } from 'url';
-import { LRUCache } from 'lru-cache';
-import crypto from 'crypto';
+import os
+import hashlib
+import asyncio
+import shutil
+import time
+from typing import Optional
+from fastapi import FastAPI, Query, HTTPException
+from fastapi.responses import FileResponse, JSONResponse
+from playwright.async_api import async_playwright
+from lru import LRU
 
-const __filename = fileURLToPath(import.meta.url);
-const __dirname = path.dirname(__filename);
+app = FastAPI()
 
-const app = express();
-const PORT = process.env.PORT || 3000;
+TEMP_DIR = "temp"
+os.makedirs(TEMP_DIR, exist_ok=True)
 
-const TEMP_DIR = path.join(__dirname, 'temp');
-await fs.mkdir(TEMP_DIR, { recursive: true });
+image_cache = LRU(100)
+video_cache = LRU(50)
 
-const imageCache = new LRUCache({ max: 100, ttl: 1000 * 60 * 60 }); // 1 jam
-const videoCache = new LRUCache({ max: 50, ttl: 1000 * 60 * 60 });  // 1 jam
+BROWSER = None
 
-const hashText = (text) => crypto.createHash('sha256').update(text).digest('hex');
+def hash_text(text: str) -> str:
+    return hashlib.sha256(text.encode()).hexdigest()
 
-app.use(morgan('dev'));
+async def launch_browser():
+    global BROWSER
+    if not BROWSER:
+        playwright = await async_playwright().start()
+        BROWSER = await playwright.chromium.launch()
 
-let browser;
-const launchBrowser = async () => {
-  if (!browser) browser = await chromium.launch();
-};
-await launchBrowser();
+async def fetch_image(text: str, index: int = 0) -> str:
+    await launch_browser()
+    context = await BROWSER.new_context(viewport={"width": 1536, "height": 695})
+    page = await context.new_page()
+    file_path = os.path.abspath("site/index.html")
 
-async function fetchImage(text, index = 0) {
-  await launchBrowser();
-  const context = await browser.newContext({ viewport: { width: 1536, height: 695 } });
-  const page = await context.newPage();
-  const filePath = path.join(__dirname, './site/index.html');
+    await page.goto(f"file://{file_path}")
+    await page.click('#toggleButtonWhite')
+    await page.click('#textOverlay')
+    await page.click('#textInput')
+    await page.fill('#textInput', text)
 
-  await page.goto(`file://${filePath}`);
-  await page.click('#toggleButtonWhite');
-  await page.click('#textOverlay');
-  await page.click('#textInput');
-  await page.fill('#textInput', text);
+    element = await page.query_selector('#textOverlay')
+    box = await element.bounding_box()
 
-  const element = await page.$('#textOverlay');
-  const box = await element.boundingBox();
+    image_path = os.path.join(TEMP_DIR, f"brat_{int(time.time())}_{index}.png")
+    await page.screenshot(path=image_path, clip={
+        "x": box["x"],
+        "y": box["y"],
+        "width": 500,
+        "height": 500
+    })
 
-  const outputPath = path.join(TEMP_DIR, `brat_${Date.now()}_${index}.png`);
-  await page.screenshot({
-    clip: {
-      x: box.x,
-      y: box.y,
-      width: 500,
-      height: 500
-    },
-    path: outputPath
-  });
+    await context.close()
+    return image_path
 
-  await context.close();
-  return outputPath;
-}
+@app.get("/")
+async def generate(text: str = Query(...), video: Optional[bool] = False):
+    key = hash_text(text)
 
-app.get('/', async (req, res) => {
-  const text = req.query.text;
-  const isVideo = req.query.video === 'true';
+    if not video:
+        if key in image_cache and os.path.exists(image_cache[key]):
+            return FileResponse(image_cache[key], media_type="image/png")
 
-  if (!text) return res.status(400).json({ error: 'Parameter "text" diperlukan' });
+        try:
+            image_path = await fetch_image(text)
+            image_cache[key] = image_path
+            return FileResponse(image_path, media_type="image/png")
+        except Exception as e:
+            raise HTTPException(status_code=500, detail=str(e))
 
-  const key = hashText(text);
+    if key in video_cache and os.path.exists(video_cache[key]):
+        return FileResponse(video_cache[key], media_type="video/mp4")
 
-  if (!isVideo) {
-    const cachedPath = imageCache.get(key);
-    if (cachedPath && existsSync(cachedPath)) return res.sendFile(cachedPath);
+    words = text.split()
+    frames = []
 
-    try {
-      const imagePath = await fetchImage(text);
-      imageCache.set(key, imagePath);
-      res.setHeader('Content-Type', 'image/png');
-      return res.sendFile(imagePath);
-    } catch (err) {
-      return res.status(500).json({ error: 'Gagal menghasilkan gambar', details: err.message });
-    }
-  }
+    try:
+        for i in range(min(len(words), 40)):
+            current_text = " ".join(words[:i+1])
+            frame_path = await fetch_image(current_text, i)
+            frames.append(frame_path)
 
-  const cachedVideo = videoCache.get(key);
-  if (cachedVideo && existsSync(cachedVideo)) return res.sendFile(cachedVideo);
+        if not frames:
+            raise ValueError("Gagal membuat gambar")
 
-  const words = text.split(' ').slice(0, 40);
-  const framePaths = [];
+        filelist_path = os.path.join(TEMP_DIR, "filelist.txt")
+        with open(filelist_path, "w") as f:
+            for frame in frames:
+                f.write(f"file '{frame}'\nduration 0.7\n")
+            f.write(f"file '{frames[-1]}'\nduration 2\n")
 
-  try {
-    for (let i = 0; i < words.length; i++) {
-      const currentText = words.slice(0, i + 1).join(' ');
-      const framePath = await fetchImage(currentText, i);
-      framePaths.push(framePath);
-    }
+        output_path = os.path.join(TEMP_DIR, f"brat_{int(time.time())}.mp4")
+        ffmpeg_cmd = f"ffmpeg -y -f concat -safe 0 -i {filelist_path} -vf fps=30,scale=512:512 -c:v libx264 -preset ultrafast -pix_fmt yuv420p {output_path}"
+        proc = await asyncio.create_subprocess_shell(ffmpeg_cmd)
+        await proc.communicate()
 
-    const listName = `filelist_${Date.now()}.txt`;
-    const fileListPath = path.join(TEMP_DIR, listName);
-    const listData = framePaths.map(p => `file '${p}'\nduration 0.7`).join('\n') +
-                     `\nfile '${framePaths.at(-1)}'\nduration 2`;
+        for frame in frames:
+            if os.path.exists(frame):
+                os.remove(frame)
+        os.remove(filelist_path)
 
-    await fs.writeFile(fileListPath, listData);
+        video_cache[key] = output_path
+        return FileResponse(output_path, media_type="video/mp4")
 
-    const outputPath = path.join(TEMP_DIR, `brat_${Date.now()}.mp4`);
-    const ffmpegCmd = `ffmpeg -y -f concat -safe 0 -i "${fileListPath}" -vf "fps=30,scale=512:512" -c:v libx264 -preset ultrafast -pix_fmt yuv420p "${outputPath}"`;
-
-    exec(ffmpegCmd, async (err) => {
-      await fs.unlink(fileListPath).catch(() => {});
-      framePaths.forEach(fp => existsSync(fp) && unlinkSync(fp));
-
-      if (err) {
-        console.error('FFmpeg error:', err);
-        return res.status(500).json({ error: 'Gagal membuat video' });
-      }
-
-      videoCache.set(key, outputPath);
-      res.setHeader('Content-Type', 'video/mp4');
-      res.sendFile(outputPath);
-    });
-
-  } catch (err) {
-    framePaths.forEach(fp => existsSync(fp) && unlinkSync(fp));
-    res.status(500).json({ error: 'Gagal memproses video', details: err.message });
-  }
-});
-
-app.listen(PORT, () => {
-  console.log(`Server running at http://localhost:${PORT}`);
-});
-
-process.on('SIGINT', async () => {
-  if (browser) await browser.close();
-  process.exit(0);
-});
+    except Exception as e:
+        for frame in frames:
+            if os.path.exists(frame):
+                os.remove(frame)
+        raise HTTPException(status_code=500, detail=str(e))
