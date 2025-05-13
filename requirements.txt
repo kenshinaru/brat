@@ -1,6 +1,0 @@
-fastapi
-uvicorn
-playwright
-aiofiles
-python-multipart
-lru-dict
