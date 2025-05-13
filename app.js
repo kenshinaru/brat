@@ -64,7 +64,13 @@ app.get('/', async (req, res) => {
   const text = req.query.text;
   const isVideo = req.query.video === 'true';
 
-  if (!text) return res.status(400).json({ error: 'Parameter "text" diperlukan' });
+  if (!text) { 
+  const json = await (await fetch('http://ip-api.com/json')).json()
+  return res.json({
+            status: true,
+            data: json
+       })
+  }
 
   const key = hashText(text);
 
