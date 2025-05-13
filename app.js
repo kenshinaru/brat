@@ -1,122 +1,146 @@
-require('dotenv').config();
+import 'dotenv/config';
+import express from 'express';
+import morgan from 'morgan';
+import { chromium } from 'playwright';
+import path from 'path';
+import fs from 'fs/promises';
+import { existsSync, createWriteStream, unlinkSync } from 'fs';
+import os from 'os';
+import { exec } from 'child_process';
+import { fileURLToPath } from 'url';
+import { LRUCache } from 'lru-cache';
+import crypto from 'crypto';
 
-const express = require('express');
-const morgan = require('morgan');
-const { chromium } = require('playwright');
-const path = require('path');
-const os = require('os');
-const axios = require('axios');
+const __filename = fileURLToPath(import.meta.url);
+const __dirname = path.dirname(__filename);
 
 const app = express();
 const PORT = process.env.PORT || 3000;
 
+const TEMP_DIR = path.join(__dirname, 'temp');
+await fs.mkdir(TEMP_DIR, { recursive: true });
+
+const imageCache = new LRUCache({ max: 100, ttl: 1000 * 60 * 60 }); // 1 jam
+const videoCache = new LRUCache({ max: 50, ttl: 1000 * 60 * 60 });  // 1 jam
+
+const hashText = (text) => crypto.createHash('sha256').update(text).digest('hex');
+
 app.use(morgan('common'));
 
-// Buat browser instance
 let browser;
-
 const launchBrowser = async () => {
-  browser = await chromium.launch(); // Browser headless
-}
+  if (!browser) browser = await chromium.launch();
+};
+await launchBrowser();
 
-launchBrowser();
+async function fetchImage(text, index = 0) {
+  await launchBrowser();
 
-async function fetchCount() {
-  try {
-    return (await axios.get("https://api.counterapi.dev/v1/aqul/brat/up")).data?.count || 0
-  } catch {
-    return 0
-  }
-}
-
-app.use('*', async (req, res) => {
-  const text = req.query.text
-  const hit = fetchCount()
-  if (!text) return res.status(200).json({
-    author: 'zennn08 (aqul)',
-    repository: {
-      github: 'https://github.com/zennn08/brat-api/'
-    },
-    hit: await hit,
-    message: "Parameter `text` diperlukan",
-    runtime: {
-      os: os.type(),
-      platform: os.platform(),
-      architecture: os.arch(),
-      cpuCount: os.cpus().length,
-      uptime: `${os.uptime()} seconds`,
-      memoryUsage: `${Math.round((os.totalmem() - os.freemem()) / 1024 / 1024)} MB used of ${Math.round(os.totalmem() / 1024 / 1024)} MB`
-    }
-  })
-  if (!browser) {
-    await launchBrowser();
-  }
-  const context = await browser.newContext({
-    viewport: {
-      width: 1536,
-      height: 695
-    }
-  });
+  const context = await browser.newContext({ viewport: { width: 1536, height: 695 } });
   const page = await context.newPage();
-
   const filePath = path.join(__dirname, './site/index.html');
 
-  // Open https://www.bratgenerator.com/
   await page.goto(`file://${filePath}`);
-
-  // Click on <div> #toggleButtonWhite
   await page.click('#toggleButtonWhite');
-
-  // Click on <div> #textOverlay
   await page.click('#textOverlay');
-
-  // Click on <input> #textInput
   await page.click('#textInput');
-
-  // Fill "sas" on <input> #textInput
   await page.fill('#textInput', text);
 
   const element = await page.$('#textOverlay');
   const box = await element.boundingBox();
 
-  res.set('Content-Type', 'image/png');
-  res.end(await page.screenshot({
+  const outputPath = path.join(TEMP_DIR, `brat_${Date.now()}_${index}.png`);
+  await page.screenshot({
     clip: {
       x: box.x,
       y: box.y,
       width: 500,
       height: 500
-    }
-  }));
+    },
+    path: outputPath
+  });
+
   await context.close();
+  return outputPath;
+}
+
+app.get('/brat', async (req, res) => {
+  const text = req.query.text;
+  if (!text) return res.status(400).json({ error: 'Parameter "text" diperlukan' });
+
+  const key = hashText(text);
+  const cachedPath = imageCache.get(key);
+
+  if (cachedPath && existsSync(cachedPath)) {
+    return res.sendFile(cachedPath);
+  }
+
+  try {
+    const imagePath = await fetchImage(text);
+    imageCache.set(key, imagePath);
+    res.setHeader('Content-Type', 'image/png');
+    res.sendFile(imagePath);
+  } catch (err) {
+    res.status(500).json({ error: 'Gagal menghasilkan gambar', details: err.message });
+  }
+});
+
+app.get('/brat-vid', async (req, res) => {
+  const text = req.query.text;
+  if (!text) return res.status(400).json({ error: 'Parameter "text" diperlukan' });
+
+  const key = hashText(text);
+  const cachedVideo = videoCache.get(key);
+
+  if (cachedVideo && existsSync(cachedVideo)) {
+    return res.sendFile(cachedVideo);
+  }
+
+  const words = text.split(' ').slice(0, 40);
+  const framePaths = [];
+
+  try {
+    for (let i = 0; i < words.length; i++) {
+      const currentText = words.slice(0, i + 1).join(' ');
+      const framePath = await fetchImage(currentText, i);
+      framePaths.push(framePath);
+    }
+
+    const listName = `filelist_${Date.now()}.txt`;
+    const fileListPath = path.join(TEMP_DIR, listName);
+    const listData = framePaths.map(p => `file '${p}'\nduration 0.7`).join('\n') +
+                     `\nfile '${framePaths.at(-1)}'\nduration 2`;
+
+    await fs.writeFile(fileListPath, listData);
+
+    const outputPath = path.join(TEMP_DIR, `brat_${Date.now()}.mp4`);
+    const ffmpegCmd = `ffmpeg -y -f concat -safe 0 -i "${fileListPath}" -vf "fps=30,scale=512:512" -c:v libx264 -preset ultrafast -pix_fmt yuv420p "${outputPath}"`;
+
+    exec(ffmpegCmd, async (err) => {
+      await fs.unlink(fileListPath).catch(() => {});
+      framePaths.forEach(fp => existsSync(fp) && unlinkSync(fp));
+
+      if (err) {
+        console.error('FFmpeg error:', err);
+        return res.status(500).json({ error: 'Gagal membuat video' });
+      }
+
+      videoCache.set(key, outputPath);
+      res.setHeader('Content-Type', 'video/mp4');
+      res.sendFile(outputPath);
+    });
+
+  } catch (err) {
+    framePaths.forEach(fp => existsSync(fp) && unlinkSync(fp));
+    res.status(500).json({ error: 'Gagal memproses video', details: err.message });
+  }
 });
 
 app.listen(PORT, () => {
-  console.log(`Server is running on port ${PORT}`);
+  console.log(`Server running at http://localhost:${PORT}`);
 });
-
-// Menangani penutupan server
-const closeBrowser = async () => {
-  if (browser) {
-    console.log('Closing browser...');
-    await browser.close();
-    console.log('Browser closed');
-  }
-};
 
 process.on('SIGINT', async () => {
-  console.log('SIGINT received');
-  await closeBrowser();
+  if (browser) await browser.close();
   process.exit(0);
-});
-
-process.on('SIGTERM', async () => {
-  console.log('SIGTERM received');
-  await closeBrowser();
-  process.exit(0);
-});
-
-process.on('exit', async () => {
-  console.log('Process exiting');
-  await closeBrowser();
 });
