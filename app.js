@@ -68,6 +68,7 @@ app.get('/', async (req, res) => {
   const json = await (await fetch('http://ip-api.com/json')).json()
   return res.json({
             status: true,
+            msg: 'Parameter text diperlukan',
             data: json
        })
   }
