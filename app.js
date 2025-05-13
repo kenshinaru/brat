@@ -4,7 +4,7 @@ import morgan from 'morgan';
 import { chromium } from 'playwright';
 import path from 'path';
 import fs from 'fs/promises';
-import { existsSync, createWriteStream, unlinkSync } from 'fs';
+import { existsSync, unlinkSync } from 'fs';
 import os from 'os';
 import { exec } from 'child_process';
 import { fileURLToPath } from 'url';
@@ -25,7 +25,7 @@ const videoCache = new LRUCache({ max: 50, ttl: 1000 * 60 * 60 });  // 1 jam
 
 const hashText = (text) => crypto.createHash('sha256').update(text).digest('hex');
 
-app.use(morgan('common'));
+app.use(morgan('dev'));
 
 let browser;
 const launchBrowser = async () => {
@@ -35,7 +35,6 @@ await launchBrowser();
 
 async function fetchImage(text, index = 0) {
   await launchBrowser();
-
   const context = await browser.newContext({ viewport: { width: 1536, height: 695 } });
   const page = await context.newPage();
   const filePath = path.join(__dirname, './site/index.html');
@@ -64,37 +63,30 @@ async function fetchImage(text, index = 0) {
   return outputPath;
 }
 
-app.get('/brat', async (req, res) => {
+app.get('/', async (req, res) => {
   const text = req.query.text;
+  const isVideo = req.query.video === 'true';
+
   if (!text) return res.status(400).json({ error: 'Parameter "text" diperlukan' });
 
   const key = hashText(text);
-  const cachedPath = imageCache.get(key);
 
-  if (cachedPath && existsSync(cachedPath)) {
-    return res.sendFile(cachedPath);
+  if (!isVideo) {
+    const cachedPath = imageCache.get(key);
+    if (cachedPath && existsSync(cachedPath)) return res.sendFile(cachedPath);
+
+    try {
+      const imagePath = await fetchImage(text);
+      imageCache.set(key, imagePath);
+      res.setHeader('Content-Type', 'image/png');
+      return res.sendFile(imagePath);
+    } catch (err) {
+      return res.status(500).json({ error: 'Gagal menghasilkan gambar', details: err.message });
+    }
   }
 
-  try {
-    const imagePath = await fetchImage(text);
-    imageCache.set(key, imagePath);
-    res.setHeader('Content-Type', 'image/png');
-    res.sendFile(imagePath);
-  } catch (err) {
-    res.status(500).json({ error: 'Gagal menghasilkan gambar', details: err.message });
-  }
-});
-
-app.get('/brat-vid', async (req, res) => {
-  const text = req.query.text;
-  if (!text) return res.status(400).json({ error: 'Parameter "text" diperlukan' });
-
-  const key = hashText(text);
   const cachedVideo = videoCache.get(key);
-
-  if (cachedVideo && existsSync(cachedVideo)) {
-    return res.sendFile(cachedVideo);
-  }
+  if (cachedVideo && existsSync(cachedVideo)) return res.sendFile(cachedVideo);
 
   const words = text.split(' ').slice(0, 40);
   const framePaths = [];
