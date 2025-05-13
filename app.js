@@ -5,7 +5,6 @@ import { chromium } from 'playwright';
 import path from 'path';
 import fs from 'fs/promises';
 import { existsSync, unlinkSync } from 'fs';
-import os from 'os';
 import { exec } from 'child_process';
 import { fileURLToPath } from 'url';
 import { LRUCache } from 'lru-cache';
@@ -33,7 +32,7 @@ const launchBrowser = async () => {
 };
 await launchBrowser();
 
-async function fetchImage(text, index = 0) {
+async function fetchImage(text, outputPath) {
   await launchBrowser();
   const context = await browser.newContext({ viewport: { width: 1536, height: 695 } });
   const page = await context.newPage();
@@ -48,7 +47,6 @@ async function fetchImage(text, index = 0) {
   const element = await page.$('#textOverlay');
   const box = await element.boundingBox();
 
-  const outputPath = path.join(TEMP_DIR, `brat_${Date.now()}_${index}.png`);
   await page.screenshot({
     clip: {
       x: box.x,
@@ -60,7 +58,6 @@ async function fetchImage(text, index = 0) {
   });
 
   await context.close();
-  return outputPath;
 }
 
 app.get('/', async (req, res) => {
@@ -76,7 +73,13 @@ app.get('/', async (req, res) => {
     if (cachedPath && existsSync(cachedPath)) return res.sendFile(cachedPath);
 
     try {
-      const imagePath = await fetchImage(text);
+      const imagePath = path.join(TEMP_DIR, `${key}.png`);
+      if (existsSync(imagePath)) {
+        imageCache.set(key, imagePath);
+        return res.sendFile(imagePath);
+      }
+
+      await fetchImage(text, imagePath);
       imageCache.set(key, imagePath);
       res.setHeader('Content-Type', 'image/png');
       return res.sendFile(imagePath);
@@ -90,13 +93,36 @@ app.get('/', async (req, res) => {
 
   const words = text.split(' ').slice(0, 40);
   const framePaths = [];
-
+  
   try {
+    const context = await browser.newContext({ viewport: { width: 1536, height: 695 } });
+    const page = await context.newPage();
+    const filePath = path.join(__dirname, './site/index.html');
+    
+    await page.goto(`file://${filePath}`);
+    await page.click('#toggleButtonWhite');
+    await page.click('#textOverlay');
+    await page.click('#textInput');
+
     for (let i = 0; i < words.length; i++) {
       const currentText = words.slice(0, i + 1).join(' ');
-      const framePath = await fetchImage(currentText, i);
+      const framePath = path.join(TEMP_DIR, `${key}_${i}.png`);
+      await page.fill('#textInput', currentText);
+      const element = await page.$('#textOverlay');
+      const box = await element.boundingBox();
+      await page.screenshot({
+        clip: {
+          x: box.x,
+          y: box.y,
+          width: 500,
+          height: 500
+        },
+        path: framePath
+      });
       framePaths.push(framePath);
     }
+
+    await context.close();
 
     const listName = `filelist_${Date.now()}.txt`;
     const fileListPath = path.join(TEMP_DIR, listName);
@@ -105,8 +131,8 @@ app.get('/', async (req, res) => {
 
     await fs.writeFile(fileListPath, listData);
 
-    const outputPath = path.join(TEMP_DIR, `brat_${Date.now()}.mp4`);
-    const ffmpegCmd = `ffmpeg -y -f concat -safe 0 -i "${fileListPath}" -vf "fps=30,scale=512:512" -c:v libx264 -preset ultrafast -pix_fmt yuv420p "${outputPath}"`;
+    const videoOutputPath = path.join(TEMP_DIR, `${key}.mp4`);
+    const ffmpegCmd = `ffmpeg -y -f concat -safe 0 -i "${fileListPath}" -vf "fps=30,scale=512:512" -c:v libx264 -preset ultrafast -pix_fmt yuv420p "${videoOutputPath}"`;
 
     exec(ffmpegCmd, async (err) => {
       await fs.unlink(fileListPath).catch(() => {});
@@ -117,9 +143,9 @@ app.get('/', async (req, res) => {
         return res.status(500).json({ error: 'Gagal membuat video' });
       }
 
-      videoCache.set(key, outputPath);
+      videoCache.set(key, videoOutputPath);
       res.setHeader('Content-Type', 'video/mp4');
-      res.sendFile(outputPath);
+      res.sendFile(videoOutputPath);
     });
 
   } catch (err) {
