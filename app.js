@@ -8,7 +8,7 @@ import { existsSync, unlinkSync } from 'fs';
 import os from 'os';
 import { exec } from 'child_process';
 import { fileURLToPath } from 'url';
-import LRU from 'lru-cache';
+import { LRUCache } from 'lru-cache';
 import crypto from 'crypto';
 
 const __filename = fileURLToPath(import.meta.url);
@@ -20,8 +20,8 @@ const PORT = process.env.PORT || 3000;
 const TEMP_DIR = path.join(__dirname, 'temp');
 await fs.mkdir(TEMP_DIR, { recursive: true });
 
-const imageCache = new LRU({ max: 100, ttl: 1000 * 60 * 60 }); // 1 jam
-const videoCache = new LRU({ max: 50, ttl: 1000 * 60 * 60 });  // 1 jam
+const imageCache = new LRUCache({ max: 100, ttl: 1000 * 60 * 60 }); // 1 jam
+const videoCache = new LRUCache({ max: 50, ttl: 1000 * 60 * 60 });  // 1 jam
 
 const hashText = (text) => crypto.createHash('sha256').update(text).digest('hex');
 
