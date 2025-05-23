@@ -1,14 +1,16 @@
 {
   "name": "brat",
   "version": "1.0.0",
-  "main": "index.js",
   "type": "module",
+  "main": "app.js",
   "license": "MIT",
+  "scripts": {
+    "start": "node app.js"
+  },
   "dependencies": {
-    "axios": "^1.7.9",
+    "@hono/node-server": "^0.38.0",
+    "hono": "^3.12.0",
     "dotenv": "^16.4.7",
-    "express": "^4.21.2",
-    "morgan": "^1.10.0",
     "playwright": "^1.49.1",
     "lru-cache": "^11.1.0"
   }
