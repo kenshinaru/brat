@@ -1,5 +1,4 @@
 import { Hono } from 'hono'
-import { serve } from '@hono/node-server'
 import { chromium } from 'playwright'
 import fs from 'fs/promises'
 import { existsSync, unlinkSync } from 'fs'
