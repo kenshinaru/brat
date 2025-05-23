@@ -8,7 +8,6 @@
     "start": "node app.js"
   },
   "dependencies": {
-    "@hono/node-server": "^0.38.0",
     "hono": "^3.12.0",
     "dotenv": "^16.4.7",
     "playwright": "^1.49.1",
